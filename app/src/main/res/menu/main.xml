@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item android:id="@+id/action_paste" android:icon="@drawable/ic_paste" android:title="Tempel" app:showAsAction="always" />
+    <item android:id="@+id/action_copy" android:icon="@drawable/ic_copy" android:title="Salin" app:showAsAction="always" />
+    <item android:id="@+id/action_cut" android:icon="@drawable/ic_cut" android:title="Potong" app:showAsAction="always" />
+    <item android:id="@+id/action_delete" android:icon="@drawable/ic_delete" android:title="Hapus" app:showAsAction="always" />
+    <item android:id="@+id/action_compress" android:title="Kompres ke ZIP" app:showAsAction="never" />
+    <item android:id="@+id/action_extract" android:title="Ekstrak" app:showAsAction="never" />
+    <item android:id="@+id/action_rename" android:title="Ganti nama" app:showAsAction="never" />
+    <item android:id="@+id/action_select_all" android:title="Pilih semua" app:showAsAction="never" />
+    <item android:id="@+id/action_new_folder" android:title="Folder baru" app:showAsAction="never" />
+    <item android:id="@+id/action_new_file" android:title="File baru" app:showAsAction="never" />
+    <item android:id="@+id/action_sort" android:title="Urutkan" app:showAsAction="never" />
+    <item android:id="@+id/action_hidden" android:checkable="true" android:title="Tampilkan file tersembunyi" app:showAsAction="never" />
+</menu>

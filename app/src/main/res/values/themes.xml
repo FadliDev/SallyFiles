@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.SallyFiles" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#00796B</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorPrimaryContainer">#B2DFDB</item>
+        <item name="colorOnPrimaryContainer">#00201C</item>
+        <item name="colorSecondaryContainer">#CCE8E4</item>
+    </style>
+</resources>
