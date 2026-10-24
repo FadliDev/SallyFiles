@@ -5,6 +5,8 @@
     <item android:id="@+id/action_copy" android:icon="@drawable/ic_copy" android:title="Salin" app:showAsAction="always" />
     <item android:id="@+id/action_cut" android:icon="@drawable/ic_cut" android:title="Potong" app:showAsAction="always" />
     <item android:id="@+id/action_delete" android:icon="@drawable/ic_delete" android:title="Hapus" app:showAsAction="always" />
+    <item android:id="@+id/action_share" android:title="Bagikan" app:showAsAction="never" />
+    <item android:id="@+id/action_location" android:title="Lokasi penyimpanan" app:showAsAction="never" />
     <item android:id="@+id/action_compress" android:title="Kompres ke ZIP" app:showAsAction="never" />
     <item android:id="@+id/action_extract" android:title="Ekstrak" app:showAsAction="never" />
     <item android:id="@+id/action_rename" android:title="Ganti nama" app:showAsAction="never" />

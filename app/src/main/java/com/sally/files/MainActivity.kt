@@ -32,7 +32,7 @@ import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
 
-    private val root: File = Environment.getExternalStorageDirectory()
+    private var root: File = Environment.getExternalStorageDirectory()
     private var currentDir: File = root
     private var items: List<File> = emptyList()
     private val selected = LinkedHashSet<File>()
@@ -175,6 +175,8 @@ class MainActivity : AppCompatActivity() {
         vis(R.id.action_compress, sel)
         vis(R.id.action_select_all, sel)
         vis(R.id.action_rename, selected.size == 1)
+        vis(R.id.action_share, sel && selected.none { it.isDirectory })
+        vis(R.id.action_location, !sel)
         vis(R.id.action_extract, selected.size == 1 && Archive.isArchive(selected.first()))
         m.findItem(R.id.action_hidden)?.isChecked = showHidden
     }
@@ -229,6 +231,8 @@ class MainActivity : AppCompatActivity() {
             R.id.action_copy -> { clipboard = selected.toList(); clipCut = false; selected.clear(); toast("Disalin"); refreshUi() }
             R.id.action_cut -> { clipboard = selected.toList(); clipCut = true; selected.clear(); toast("Dipotong"); refreshUi() }
             R.id.action_paste -> paste()
+            R.id.action_share -> share()
+            R.id.action_location -> pickLocation()
             R.id.action_delete -> confirmDelete()
             R.id.action_compress -> compress()
             R.id.action_extract -> archiveDialog(selected.first())
@@ -262,6 +266,45 @@ class MainActivity : AppCompatActivity() {
             files.forEach { if (cut) FileOps.move(it, dir) else FileOps.copy(it, dir) }
         }
         if (cut) clipboard = emptyList()
+    }
+
+    private fun share() {
+        try {
+            val uris = ArrayList<Uri>(selected.map { FileProvider.getUriForFile(this, "$packageName.provider", it) })
+            val i = if (uris.size == 1) Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, uris[0])
+            else Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            i.type = "*/*"
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(Intent.createChooser(i, "Bagikan"))
+        } catch (e: Exception) {
+            toast(e.message ?: "Gagal membagikan")
+        }
+    }
+
+    /** Root penyimpanan: internal + kartu SD (kalau ada) */
+    private fun storageRoots(): List<File> {
+        val list = ArrayList<File>()
+        list.add(Environment.getExternalStorageDirectory())
+        getExternalFilesDirs(null).drop(1).filterNotNull().forEach {
+            val p = it.absolutePath.substringBefore("/Android/")
+            if (p != it.absolutePath) list.add(File(p))
+        }
+        return list
+    }
+
+    private fun pickLocation() {
+        val locs = LinkedHashMap<String, File>()
+        val roots = storageRoots()
+        locs["Penyimpanan internal"] = roots[0]
+        roots.drop(1).forEachIndexed { i, f -> locs["Kartu SD ${i + 1}"] = f }
+        locs["Download"] = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        locs["DCIM"] = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+        val names = locs.keys.toTypedArray()
+        MaterialAlertDialogBuilder(this).setTitle("Lokasi").setItems(names) { _, w ->
+            val dir = locs[names[w]]!!
+            root = roots.firstOrNull { dir.path.startsWith(it.path) } ?: roots[0]
+            go(dir)
+        }.show()
     }
 
     private fun confirmDelete() {
