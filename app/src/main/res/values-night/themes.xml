@@ -1,9 +1,8 @@
 <resources>
-    <style name="Theme.SallyFiles" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="colorPrimary">#90CAF9</item>
-        <item name="colorOnPrimary">#00315F</item>
-        <item name="colorPrimaryContainer">#0B4A8F</item>
-        <item name="colorOnPrimaryContainer">#D3E3FD</item>
-        <item name="colorSecondaryContainer">#2F4468</item>
+    <style name="Theme.SallyFiles" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

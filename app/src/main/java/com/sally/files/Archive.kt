@@ -7,140 +7,150 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
-import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.util.zip.ZipEntry
-import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 object Archive {
-    private val exts = listOf(".zip", ".jar", ".apk", ".tar", ".tar.gz", ".tgz", ".gz", ".7z")
+    private val exts = listOf(".zip", ".jar", ".apk", ".tar.gz", ".tgz", ".tar", ".gz", ".7z")
 
-    fun isArchive(f: File): Boolean {
-        if (!f.isFile) return false
-        val n = f.name.lowercase()
-        return exts.any { n.endsWith(it) }
+    fun isArchive(n: Node): Boolean {
+        if (n.isDir) return false
+        val l = n.name.lowercase()
+        return exts.any { l.endsWith(it) }
     }
 
-    fun baseName(f: File): String {
-        val n = f.name
-        val l = n.lowercase()
-        for (e in exts.sortedByDescending { it.length }) {
-            if (l.endsWith(e) && n.length > e.length) return n.substring(0, n.length - e.length)
+    fun baseName(n: Node): String {
+        val l = n.name.lowercase()
+        for (e in exts) {
+            if (l.endsWith(e) && n.name.length > e.length) return n.name.substring(0, n.name.length - e.length)
         }
-        return n
+        return n.name
     }
 
     // ---------- ZIP ----------
-    fun zip(files: List<File>, out: File) {
-        val outPath = out.canonicalPath
-        ZipOutputStream(BufferedOutputStream(out.outputStream(), 64 * 1024)).use { z ->
-            files.forEach { add(z, it, it.name, outPath) }
+    fun zip(v: Vfs, files: List<Node>, outDir: Node, outName: String) {
+        val out = v.createFile(outDir, outName)
+        ZipOutputStream(BufferedOutputStream(v.openOut(out), 64 * 1024)).use { z ->
+            files.forEach { add(v, z, it, it.name, out.key) }
         }
     }
 
-    private fun add(z: ZipOutputStream, f: File, path: String, skip: String) {
-        if (f.canonicalPath == skip) return
-        if (f.isDirectory) {
-            val kids = f.listFiles() ?: emptyArray()
+    private fun add(v: Vfs, z: ZipOutputStream, n: Node, path: String, skip: String) {
+        if (n.key == skip) return
+        if (n.isDir) {
+            val kids = v.list(n) ?: emptyList()
             if (kids.isEmpty()) {
                 z.putNextEntry(ZipEntry("$path/"))
                 z.closeEntry()
             }
-            kids.forEach { add(z, it, "$path/${it.name}", skip) }
+            kids.forEach { add(v, z, it, "$path/${it.name}", skip) }
         } else {
             val e = ZipEntry(path)
-            e.time = f.lastModified()
+            if (n.modified > 0) e.time = n.modified
             z.putNextEntry(e)
-            f.inputStream().use { it.copyTo(z, 64 * 1024) }
+            v.openIn(n).use { it.copyTo(z, 64 * 1024) }
             z.closeEntry()
         }
     }
 
-    // ---------- EXTRACT ----------
-    fun extract(src: File, dest: File) {
-        dest.mkdirs()
+    // ---------- EKSTRAK ----------
+    fun extract(v: Vfs, src: Node, dest: Node) {
         val n = src.name.lowercase()
+        val cache = HashMap<String, Node>()
         when {
-            n.endsWith(".7z") -> un7z(src, dest)
+            n.endsWith(".7z") -> un7z(v, src, dest, cache)
             n.endsWith(".tar.gz") || n.endsWith(".tgz") ->
-                untar(GzipCompressorInputStream(BufferedInputStream(src.inputStream())), dest)
-            n.endsWith(".tar") -> untar(BufferedInputStream(src.inputStream()), dest)
-            n.endsWith(".gz") -> ungz(src, dest)
-            else -> unzip(src, dest)
+                v.openIn(src).buffered().use { untar(v, GzipCompressorInputStream(it), dest, cache) }
+            n.endsWith(".tar") -> v.openIn(src).buffered().use { untar(v, it, dest, cache) }
+            n.endsWith(".gz") -> ungz(v, src, dest)
+            else -> unzip(v, src, dest, cache)
         }
     }
 
-    /** Cegah zip-slip: hasil harus tetap di dalam folder tujuan */
-    private fun safe(dest: File, name: String): File {
-        val f = File(dest, name)
-        if (!f.canonicalPath.startsWith(dest.canonicalPath + File.separator)) {
-            throw SecurityException("Entri tidak aman: $name")
+    private fun ensureDir(v: Vfs, root: Node, parts: List<String>, cache: HashMap<String, Node>): Node {
+        var cur = root
+        var path = ""
+        for (p in parts) {
+            path += "/$p"
+            val parent = cur
+            cur = cache.getOrPut(path) { v.child(parent, p)?.takeIf { it.isDir } ?: v.createDir(parent, p) }
         }
-        return f
+        return cur
     }
 
-    private fun unzip(src: File, dest: File) {
-        ZipFile(src).use { z ->
-            val en = z.entries()
-            while (en.hasMoreElements()) {
-                val e = en.nextElement()
-                val t = safe(dest, e.name)
-                if (e.isDirectory) {
-                    t.mkdirs()
-                } else {
-                    t.parentFile?.mkdirs()
-                    z.getInputStream(e).use { i -> t.outputStream().use { o -> i.copyTo(o, 64 * 1024) } }
-                    if (e.time > 0) t.setLastModified(e.time)
-                }
+    /** Tulis satu entri arsip ke folder tujuan (dengan perlindungan zip-slip) */
+    private fun writeEntry(
+        v: Vfs, dest: Node, cache: HashMap<String, Node>,
+        rawName: String, isDir: Boolean, copier: (OutputStream) -> Unit
+    ) {
+        val parts = rawName.replace('\\', '/').split('/').filter { it.isNotEmpty() && it != "." }
+        if (parts.any { it == ".." }) throw SecurityException("Entri tidak aman: $rawName")
+        if (parts.isEmpty()) return
+        if (isDir) {
+            ensureDir(v, dest, parts, cache)
+            return
+        }
+        val parent = ensureDir(v, dest, parts.dropLast(1), cache)
+        val f = v.createFile(parent, parts.last())
+        v.openOut(f).use { copier(it) }
+    }
+
+    private fun unzip(v: Vfs, src: Node, dest: Node, cache: HashMap<String, Node>) {
+        ZipInputStream(BufferedInputStream(v.openIn(src))).use { z ->
+            var e = z.nextEntry
+            while (e != null) {
+                writeEntry(v, dest, cache, e.name, e.isDirectory) { o -> z.copyTo(o, 64 * 1024) }
+                z.closeEntry()
+                e = z.nextEntry
             }
         }
     }
 
-    private fun untar(ins: InputStream, dest: File) {
+    private fun untar(v: Vfs, ins: InputStream, dest: Node, cache: HashMap<String, Node>) {
         TarArchiveInputStream(ins).use { t ->
             var e: ArchiveEntry? = t.nextEntry
             while (e != null) {
-                val target = safe(dest, e.name)
-                if (e.isDirectory) {
-                    target.mkdirs()
-                } else {
-                    target.parentFile?.mkdirs()
-                    target.outputStream().use { o -> t.copyTo(o, 64 * 1024) }
-                }
+                writeEntry(v, dest, cache, e.name, e.isDirectory) { o -> t.copyTo(o, 64 * 1024) }
                 e = t.nextEntry
             }
         }
     }
 
-    private fun ungz(src: File, dest: File) {
+    private fun ungz(v: Vfs, src: Node, dest: Node) {
         val name = src.name.removeSuffix(".gz").removeSuffix(".GZ").ifEmpty { "output" }
-        val t = FileOps.uniqueName(dest, name)
-        GzipCompressorInputStream(BufferedInputStream(src.inputStream())).use { i ->
-            t.outputStream().use { o -> i.copyTo(o, 64 * 1024) }
+        val t = v.createFile(dest, v.uniqueName(dest, name))
+        GzipCompressorInputStream(BufferedInputStream(v.openIn(src))).use { i ->
+            v.openOut(t).use { o -> i.copyTo(o, 64 * 1024) }
         }
     }
 
-    private fun un7z(src: File, dest: File) {
-        SevenZFile(src).use { s ->
-            var e = s.nextEntry
-            val buf = ByteArray(64 * 1024)
-            while (e != null) {
-                val t = safe(dest, e.name)
-                if (e.isDirectory) {
-                    t.mkdirs()
-                } else {
-                    t.parentFile?.mkdirs()
-                    t.outputStream().use { o ->
+    private fun un7z(v: Vfs, src: Node, dest: Node, cache: HashMap<String, Node>) {
+        // SevenZFile butuh File; kalau sumbernya SAF, salin dulu ke cache
+        var tmp: File? = null
+        val f: File = src.file ?: File.createTempFile("x7z", ".7z", v.cacheDir).also { t ->
+            tmp = t
+            v.openIn(src).use { i -> t.outputStream().use { o -> i.copyTo(o, 64 * 1024) } }
+        }
+        try {
+            SevenZFile(f).use { s ->
+                val buf = ByteArray(64 * 1024)
+                var e = s.nextEntry
+                while (e != null) {
+                    writeEntry(v, dest, cache, e.name ?: "", e.isDirectory) { o ->
                         while (true) {
                             val n = s.read(buf)
                             if (n < 0) break
                             o.write(buf, 0, n)
                         }
                     }
+                    e = s.nextEntry
                 }
-                e = s.nextEntry
             }
+        } finally {
+            tmp?.delete()
         }
     }
 }

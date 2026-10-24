@@ -8,94 +8,67 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.Settings
-import android.view.View
 import android.webkit.MimeTypeMap
-import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.OnBackPressedCallback
-import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.appbar.MaterialToolbar
-import com.google.android.material.color.DynamicColors
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.google.android.material.floatingactionbutton.FloatingActionButton
-import com.google.android.material.progressindicator.LinearProgressIndicator
-import java.io.File
-import java.io.IOException
-import java.util.concurrent.Executors
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : ComponentActivity() {
+    private val vm: MainViewModel by viewModels()
+    private var access by mutableStateOf(true)
 
-    private var root: File = Environment.getExternalStorageDirectory()
-    private var currentDir: File = root
-    private var items: List<File> = emptyList()
-    private val selected = LinkedHashSet<File>()
-    private var clipboard: List<File> = emptyList()
-    private var clipCut = false
-    private var showHidden = false
-    private var sortBy = 0 // 0 nama, 1 ukuran, 2 tanggal
-    private var busy = false
+    private val pickTree = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            try {
+                contentResolver.takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (_: Exception) {}
+            vm.addTree(uri)
+        }
+    }
 
-    private val io = Executors.newSingleThreadExecutor()
-    private lateinit var toolbar: MaterialToolbar
-    private lateinit var progress: LinearProgressIndicator
-    private lateinit var empty: TextView
-    private lateinit var fab: FloatingActionButton
-    private lateinit var adapter: FileAdapter
+    private val reqPerm = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        access = hasAccess()
+        vm.reload()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        DynamicColors.applyToActivityIfAvailable(this)
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-
-        val prefs = getSharedPreferences("prefs", MODE_PRIVATE)
-        showHidden = prefs.getBoolean("hidden", false)
-        sortBy = prefs.getInt("sort", 0)
-
-        toolbar = findViewById(R.id.toolbar)
-        progress = findViewById(R.id.progress)
-        empty = findViewById(R.id.empty)
-        fab = findViewById(R.id.fab)
-
-        toolbar.inflateMenu(R.menu.main)
-        toolbar.setOnMenuItemClickListener { onMenu(it.itemId) }
-        toolbar.setNavigationOnClickListener { selected.clear(); refreshUi() }
-
-        adapter = FileAdapter(::onItemClick, ::onItemLong)
-        findViewById<RecyclerView>(R.id.list).apply {
-            layoutManager = LinearLayoutManager(this@MainActivity)
-            adapter = this@MainActivity.adapter
-            setHasFixedSize(true)
-        }
-
-        empty.setOnClickListener { if (!hasAccess()) requestAccess() }
-        fab.setOnClickListener {
-            MaterialAlertDialogBuilder(this).setItems(arrayOf("Folder baru", "File baru")) { _, w ->
-                if (w == 0) newItem(true) else newItem(false)
-            }.show()
-        }
-
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                val parent = currentDir.parentFile
-                when {
-                    selected.isNotEmpty() -> { selected.clear(); refreshUi() }
-                    currentDir.path != root.path && parent != null -> go(parent)
-                    else -> finish()
+        access = hasAccess()
+        setContent {
+            SallyTheme(vm.settings) {
+                if (vm.inSettings) {
+                    SettingsScreen(vm, onPickTree = ::launchPicker)
+                } else {
+                    BrowserScreen(
+                        vm = vm,
+                        hasAccess = access,
+                        onRequestAccess = ::requestAccess,
+                        onOpenFile = ::openNode,
+                        onShare = ::shareNodes,
+                        onPickTree = ::launchPicker
+                    )
                 }
             }
-        })
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        if (!busy) load()
+        access = hasAccess()
+        vm.reload()
     }
 
     // ---------- izin ----------
@@ -114,282 +87,54 @@ class MainActivity : AppCompatActivity() {
                 startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             }
         } else {
-            requestPermissions(
-                arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE), 1
-            )
+            reqPerm.launch(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE))
         }
     }
 
-    override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
-        super.onRequestPermissionsResult(code, perms, res)
-        load()
-    }
-
-    // ---------- list ----------
-    private fun go(dir: File) {
-        selected.clear()
-        currentDir = dir
-        load()
-    }
-
-    private fun load() {
-        if (!hasAccess()) {
-            items = emptyList()
-            empty.text = "Izin akses file dibutuhkan.\nKetuk untuk memberi izin"
-            refreshUi()
-            return
+    // ---------- SAF picker (Termux, Acode, SD card, dll) ----------
+    private fun launchPicker(preset: String?) {
+        val hint: Uri? = when (preset) {
+            "termux" -> DocumentsContract.buildTreeDocumentUri("com.termux.documents", "/data/data/com.termux/files/home")
+            else -> null
         }
-        val all = currentDir.listFiles()
-        val cmp: Comparator<File> = when (sortBy) {
-            1 -> compareBy<File> { if (it.isDirectory) 0L else it.length() }
-            2 -> compareByDescending<File> { it.lastModified() }
-            else -> compareBy<File, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
+        if (preset == "acode") {
+            Toast.makeText(this, "Pilih \"Acode\" di sidebar picker, lalu tekan \"Gunakan folder ini\"", Toast.LENGTH_LONG).show()
         }
-        items = (all ?: emptyArray())
-            .filter { showHidden || !it.name.startsWith(".") }
-            .sortedWith(compareByDescending<File> { it.isDirectory }.then(cmp))
-        selected.retainAll(items.toSet())
-        empty.text = if (all == null) "Folder tidak bisa dibuka" else "Folder kosong"
-        refreshUi()
-    }
-
-    private fun refreshUi() {
-        adapter.submit(items, selected)
-        empty.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
-        val sel = selected.isNotEmpty()
-        toolbar.title = if (sel) "${selected.size} dipilih" else currentDir.name.ifEmpty { "/" }
-        toolbar.subtitle = if (sel) null else currentDir.path
-        toolbar.navigationIcon = if (sel) ContextCompat.getDrawable(this, R.drawable.ic_close) else null
-        fab.visibility = if (sel) View.GONE else View.VISIBLE
-
-        val m = toolbar.menu
-        fun vis(id: Int, v: Boolean) { m.findItem(id)?.isVisible = v }
-        vis(R.id.action_paste, !sel && clipboard.isNotEmpty())
-        vis(R.id.action_new_folder, !sel)
-        vis(R.id.action_new_file, !sel)
-        vis(R.id.action_sort, !sel)
-        vis(R.id.action_hidden, !sel)
-        vis(R.id.action_copy, sel)
-        vis(R.id.action_cut, sel)
-        vis(R.id.action_delete, sel)
-        vis(R.id.action_compress, sel)
-        vis(R.id.action_select_all, sel)
-        vis(R.id.action_rename, selected.size == 1)
-        vis(R.id.action_share, sel && selected.none { it.isDirectory })
-        vis(R.id.action_location, !sel)
-        vis(R.id.action_extract, selected.size == 1 && Archive.isArchive(selected.first()))
-        m.findItem(R.id.action_hidden)?.isChecked = showHidden
-    }
-
-    // ---------- klik ----------
-    private fun onItemClick(f: File) {
-        if (selected.isNotEmpty()) { toggle(f); return }
-        when {
-            f.isDirectory -> go(f)
-            Archive.isArchive(f) && !f.name.endsWith(".apk", true) -> archiveDialog(f)
-            else -> openExternal(f)
-        }
-    }
-
-    private fun onItemLong(f: File) = toggle(f)
-
-    private fun toggle(f: File) {
-        if (!selected.remove(f)) selected.add(f)
-        refreshUi()
-    }
-
-    private fun openExternal(f: File) {
         try {
-            val uri = FileProvider.getUriForFile(this, "$packageName.provider", f)
-            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase()) ?: "*/*"
+            pickTree.launch(hint)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Picker folder tidak tersedia", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // ---------- buka & bagikan ----------
+    private fun uriOf(n: Node): Uri =
+        n.file?.let { FileProvider.getUriForFile(this, "$packageName.provider", it) } ?: n.uri!!
+
+    private fun openNode(n: Node) {
+        try {
+            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(n.ext) ?: "*/*"
             startActivity(
-                Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+                Intent(Intent.ACTION_VIEW).setDataAndType(uriOf(n), mime)
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             )
         } catch (e: ActivityNotFoundException) {
-            toast("Tidak ada aplikasi untuk membuka file ini")
+            Toast.makeText(this, "Tidak ada aplikasi untuk membuka file ini", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
-            toast(e.message ?: "Gagal membuka file")
+            Toast.makeText(this, e.message ?: "Gagal membuka file", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun archiveDialog(f: File) {
-        MaterialAlertDialogBuilder(this)
-            .setTitle(f.name)
-            .setItems(arrayOf("Ekstrak ke folder \"${Archive.baseName(f)}\"", "Ekstrak di sini", "Buka dengan aplikasi lain")) { _, w ->
-                when (w) {
-                    0 -> extract(f, FileOps.uniqueName(currentDir, Archive.baseName(f)))
-                    1 -> extract(f, currentDir)
-                    else -> openExternal(f)
-                }
-            }.show()
-    }
-
-    // ---------- menu ----------
-    private fun onMenu(id: Int): Boolean {
-        when (id) {
-            R.id.action_copy -> { clipboard = selected.toList(); clipCut = false; selected.clear(); toast("Disalin"); refreshUi() }
-            R.id.action_cut -> { clipboard = selected.toList(); clipCut = true; selected.clear(); toast("Dipotong"); refreshUi() }
-            R.id.action_paste -> paste()
-            R.id.action_share -> share()
-            R.id.action_location -> pickLocation()
-            R.id.action_delete -> confirmDelete()
-            R.id.action_compress -> compress()
-            R.id.action_extract -> archiveDialog(selected.first())
-            R.id.action_rename -> rename(selected.first())
-            R.id.action_select_all -> { selected.addAll(items); refreshUi() }
-            R.id.action_new_folder -> newItem(true)
-            R.id.action_new_file -> newItem(false)
-            R.id.action_sort -> {
-                MaterialAlertDialogBuilder(this).setTitle("Urutkan")
-                    .setSingleChoiceItems(arrayOf("Nama", "Ukuran", "Tanggal"), sortBy) { d, w ->
-                        sortBy = w
-                        getSharedPreferences("prefs", MODE_PRIVATE).edit().putInt("sort", w).apply()
-                        d.dismiss(); load()
-                    }.show()
-            }
-            R.id.action_hidden -> {
-                showHidden = !showHidden
-                getSharedPreferences("prefs", MODE_PRIVATE).edit().putBoolean("hidden", showHidden).apply()
-                load()
-            }
-            else -> return false
-        }
-        return true
-    }
-
-    private fun paste() {
-        val files = clipboard
-        val cut = clipCut
-        val dir = currentDir
-        runTask {
-            files.forEach { if (cut) FileOps.move(it, dir) else FileOps.copy(it, dir) }
-        }
-        if (cut) clipboard = emptyList()
-    }
-
-    private fun share() {
+    private fun shareNodes(list: List<Node>) {
         try {
-            val uris = ArrayList<Uri>(selected.map { FileProvider.getUriForFile(this, "$packageName.provider", it) })
+            val uris = ArrayList<Uri>(list.map { uriOf(it) })
             val i = if (uris.size == 1) Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, uris[0])
             else Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
             i.type = "*/*"
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             startActivity(Intent.createChooser(i, "Bagikan"))
         } catch (e: Exception) {
-            toast(e.message ?: "Gagal membagikan")
+            Toast.makeText(this, e.message ?: "Gagal membagikan", Toast.LENGTH_SHORT).show()
         }
-    }
-
-    /** Root penyimpanan: internal + kartu SD (kalau ada) */
-    private fun storageRoots(): List<File> {
-        val list = ArrayList<File>()
-        list.add(Environment.getExternalStorageDirectory())
-        getExternalFilesDirs(null).drop(1).filterNotNull().forEach {
-            val p = it.absolutePath.substringBefore("/Android/")
-            if (p != it.absolutePath) list.add(File(p))
-        }
-        return list
-    }
-
-    private fun pickLocation() {
-        val locs = LinkedHashMap<String, File>()
-        val roots = storageRoots()
-        locs["Penyimpanan internal"] = roots[0]
-        roots.drop(1).forEachIndexed { i, f -> locs["Kartu SD ${i + 1}"] = f }
-        locs["Download"] = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        locs["DCIM"] = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
-        val names = locs.keys.toTypedArray()
-        MaterialAlertDialogBuilder(this).setTitle("Lokasi").setItems(names) { _, w ->
-            val dir = locs[names[w]]!!
-            root = roots.firstOrNull { dir.path.startsWith(it.path) } ?: roots[0]
-            go(dir)
-        }.show()
-    }
-
-    private fun confirmDelete() {
-        val files = selected.toList()
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Hapus")
-            .setMessage(if (files.size == 1) "Hapus \"${files[0].name}\"?" else "Hapus ${files.size} item?")
-            .setPositiveButton("Hapus") { _, _ ->
-                runTask { files.forEach { if (!FileOps.delete(it)) throw IOException("Gagal menghapus ${it.name}") } }
-            }
-            .setNegativeButton("Batal", null).show()
-    }
-
-    private fun compress() {
-        val files = selected.toList()
-        val def = if (files.size == 1) files[0].nameWithoutExtension.ifEmpty { files[0].name } else "Archive"
-        val dir = currentDir
-        input("Nama ZIP", "$def.zip") { n ->
-            val name = if (n.endsWith(".zip", true)) n else "$n.zip"
-            val out = FileOps.uniqueName(dir, name)
-            runTask { Archive.zip(files, out) }
-        }
-    }
-
-    private fun extract(f: File, dest: File) = runTask { Archive.extract(f, dest) }
-
-    private fun rename(f: File) {
-        input("Ganti nama", f.name) { n ->
-            val t = File(f.parentFile, n)
-            when {
-                t.exists() -> toast("Nama sudah dipakai")
-                !f.renameTo(t) -> toast("Gagal mengganti nama")
-                else -> { selected.clear(); load() }
-            }
-        }
-    }
-
-    private fun newItem(folder: Boolean) {
-        input(if (folder) "Folder baru" else "File baru", "") { n ->
-            val t = File(currentDir, n)
-            if (t.exists()) { toast("Nama sudah dipakai"); return@input }
-            val ok = try { if (folder) t.mkdirs() else t.createNewFile() } catch (e: IOException) { false }
-            if (!ok) toast("Gagal membuat")
-            load()
-        }
-    }
-
-    // ---------- helper ----------
-    private fun input(title: String, initial: String, ok: (String) -> Unit) {
-        val et = EditText(this).apply { setText(initial); setSingleLine(); selectAll() }
-        val pad = (20 * resources.displayMetrics.density).toInt()
-        val box = FrameLayout(this).apply { setPadding(pad, 8, pad, 0); addView(et) }
-        MaterialAlertDialogBuilder(this).setTitle(title).setView(box)
-            .setPositiveButton("OK") { _, _ ->
-                val s = et.text.toString().trim()
-                when {
-                    s.isEmpty() -> {}
-                    s.contains('/') -> toast("Nama tidak boleh mengandung /")
-                    else -> ok(s)
-                }
-            }
-            .setNegativeButton("Batal", null).show()
-    }
-
-    private fun runTask(block: () -> Unit) {
-        if (busy) { toast("Masih memproses…"); return }
-        busy = true
-        progress.visibility = View.VISIBLE
-        io.execute {
-            var err: String? = null
-            try { block() } catch (e: Exception) { err = e.message ?: e.javaClass.simpleName }
-            runOnUiThread {
-                busy = false
-                progress.visibility = View.GONE
-                selected.clear()
-                toast(err ?: "Selesai")
-                load()
-            }
-        }
-    }
-
-    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
-
-    override fun onDestroy() {
-        super.onDestroy()
-        io.shutdown()
     }
 }

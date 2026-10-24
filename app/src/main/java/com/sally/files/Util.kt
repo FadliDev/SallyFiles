@@ -1,6 +1,5 @@
 package com.sally.files
 
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -19,5 +18,5 @@ object Fmt {
     }
 
     fun date(t: Long): String = df.format(Date(t))
-    fun isImage(f: File) = f.extension.lowercase() in imgExt
+    fun isImage(n: Node) = n.ext in imgExt
 }
